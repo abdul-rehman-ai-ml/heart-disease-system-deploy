@@ -1,0 +1,124 @@
+name: Deploy to SageMaker
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  SAGEMAKER_ROLE: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+  MODEL_NAME: heart-disease-predictor
+  ENDPOINT_NAME: heart-disease-predictor
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Train model
+      run: |
+        python train_and_save.py
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Package model for SageMaker
+      run: |
+        mkdir -p model
+        cp model.joblib model/
+        cp inference.py model/
+        tar -czf model.tar.gz -C model .
+    
+    - name: Upload model to S3
+      run: |
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        aws s3 cp model.tar.gz s3://${{ secrets.S3_BUCKET }}/models/${{ env.MODEL_NAME }}/${TIMESTAMP}/model.tar.gz
+        echo "MODEL_S3_URI=s3://${{ secrets.S3_BUCKET }}/models/${{ env.MODEL_NAME }}/${TIMESTAMP}/model.tar.gz" >> $GITHUB_ENV
+    
+    - name: Create SageMaker Model
+      run: |
+        # Delete existing model if it exists
+        aws sagemaker delete-model --model-name ${{ env.MODEL_NAME }} 2>/dev/null || true
+        
+        # Create new model
+        aws sagemaker create-model \
+          --model-name ${{ env.MODEL_NAME }} \
+          --primary-container Image=683313688378.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/sagemaker-scikit-learn:1.0-1-cpu-py3,ModelDataUrl=${{ env.MODEL_S3_URI }} \
+          --execution-role-arn ${{ env.SAGEMAKER_ROLE }}
+    
+    - name: Create Endpoint Config
+      run: |
+        # Delete existing endpoint config if it exists
+        aws sagemaker delete-endpoint-config --endpoint-config-name ${{ env.MODEL_NAME }}-config 2>/dev/null || true
+        
+        # Create new endpoint config
+        aws sagemaker create-endpoint-config \
+          --endpoint-config-name ${{ env.MODEL_NAME }}-config \
+          --production-variants VariantName=AllTraffic,ModelName=${{ env.MODEL_NAME }},InitialInstanceCount=1,InstanceType=ml.t2.medium
+    
+    - name: Create or Update Endpoint
+      run: |
+        # Check if endpoint exists
+        if aws sagemaker describe-endpoint --endpoint-name ${{ env.ENDPOINT_NAME }} 2>/dev/null; then
+          echo "Updating existing endpoint..."
+          aws sagemaker update-endpoint \
+            --endpoint-name ${{ env.ENDPOINT_NAME }} \
+            --endpoint-config-name ${{ env.MODEL_NAME }}-config
+        else
+          echo "Creating new endpoint..."
+          aws sagemaker create-endpoint \
+            --endpoint-name ${{ env.ENDPOINT_NAME }} \
+            --endpoint-config-name ${{ env.MODEL_NAME }}-config
+        fi
+    
+    - name: Wait for Endpoint
+      run: |
+        echo "Waiting for endpoint to be in service..."
+        aws sagemaker wait endpoint-in-service --endpoint-name ${{ env.ENDPOINT_NAME }}
+        echo "Endpoint is ready!"
+    
+    - name: Test Endpoint
+      run: |
+        python << 'EOF'
+        import boto3
+        import json
+        
+        client = boto3.client('sagemaker-runtime', region_name='${{ env.AWS_REGION }}')
+        
+        response = client.invoke_endpoint(
+            EndpointName='${{ env.ENDPOINT_NAME }}',
+            ContentType='application/json',
+            Body=json.dumps({
+                'instances': [[63, 1, 3, 145, 233, 1, 0, 150, 0, 2.3, 0, 0, 1]]
+            })
+        )
+        
+        result = json.loads(response['Body'].read())
+        print('Test Prediction:', result)
+        EOF
+    
+    - name: Deployment Summary
+      run: |
+        echo "✅ Deployment Complete!"
+        echo "Endpoint Name: ${{ env.ENDPOINT_NAME }}"
+        echo "Model S3 URI: ${{ env.MODEL_S3_URI }}"
+        echo "Region: ${{ env.AWS_REGION }}"
