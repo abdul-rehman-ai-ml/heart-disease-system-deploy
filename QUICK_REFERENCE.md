@@ -148,16 +148,21 @@ print(f"Risk Score: {result['risk_scores'][0]:.2%}")
 
 ## 🛠️ Troubleshooting Quick Fixes
 
+### Error: "ValidationException" (IAM Role ARN)
+**Most Common Issue!**
+```bash
+# Fix: See QUICK_FIX.md or FIX_IAM_ROLE_ERROR.md
+# Verify your setup:
+python verify_aws_setup.py
+
+# Check role ARN format
+aws iam get-role --role-name SageMakerExecutionRole
+```
+
 ### Error: "ResourceNotFound"
 ```bash
 # Check if endpoint exists
 aws sagemaker describe-endpoint --endpoint-name heart-disease-predictor
-```
-
-### Error: "ValidationException"
-```bash
-# Check role ARN format
-aws iam get-role --role-name SageMakerExecutionRole
 ```
 
 ### Error: "AccessDenied"
